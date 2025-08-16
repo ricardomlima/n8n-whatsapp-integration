@@ -1,0 +1,99 @@
+name: Deploy to Development
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ENVIRONMENT: dev
+
+jobs:
+  validate:
+    name: Validate Infrastructure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Install CDK dependencies
+        run: npm ci
+
+      - name: CDK Synthesize
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          npx cdk synth n8n-whatsapp-${{ env.ENVIRONMENT }} \
+            --context environment=${{ env.ENVIRONMENT }}
+
+  deploy:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: validate
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install CDK dependencies
+        run: npm ci
+
+      - name: Deploy CDK stack
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          npx cdk bootstrap aws://${{ secrets.AWS_ACCOUNT_ID }}/${{ env.AWS_REGION }}
+          npx cdk deploy n8n-whatsapp-${{ env.ENVIRONMENT }} \
+            --context environment=${{ env.ENVIRONMENT }} \
+            --require-approval never \
+            --outputs-file outputs.json
+
+      - name: Save deployment outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-outputs-${{ env.ENVIRONMENT }}
+          path: outputs.json
+
+  notify:
+    name: Notify Deployment Status
+    runs-on: ubuntu-latest
+    needs: [validate, deploy]
+    if: always()
+
+    steps:
+      - name: Notify Success
+        if: needs.deploy.result == 'success'
+        run: |
+          echo "✅ Development deployment successful!"
+          echo "Environment: ${{ env.ENVIRONMENT }}"
+          echo "Commit: ${{ github.sha }}"
+
+      - name: Notify Failure
+        if: needs.deploy.result == 'failure'
+        run: |
+          echo "❌ Development deployment failed!"
+          echo "Environment: ${{ env.ENVIRONMENT }}"
+          echo "Commit: ${{ github.sha }}"
+          exit 1
