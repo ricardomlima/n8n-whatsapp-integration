@@ -3,12 +3,12 @@ name: Deploy to Development
 on:
   push:
     branches:
-      - dev
+      - development
   workflow_dispatch:
 
 env:
   AWS_REGION: us-east-1
-  ENVIRONMENT: dev
+  ENVIRONMENT: development
 
 jobs:
   validate:
