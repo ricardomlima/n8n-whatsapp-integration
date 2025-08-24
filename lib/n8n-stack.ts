@@ -64,25 +64,25 @@ export class N8nStack extends cdk.Stack {
     });
 
     // Security Groups
-    const databaseSg = new ec2.SecurityGroup(this, "DatabaseSg", {
+    const databaseSg = new ec2.SecurityGroup(this, "n8nDatabaseSg", {
       vpc,
       description: "Security group for RDS database",
       allowAllOutbound: false,
     });
 
-    const redisSg = new ec2.SecurityGroup(this, "RedisSg", {
+    const redisSg = new ec2.SecurityGroup(this, "n8nRedisSg", {
       vpc,
       description: "Security group for Redis cache",
       allowAllOutbound: false,
     });
 
-    const applicationSg = new ec2.SecurityGroup(this, "ApplicationSg", {
+    const applicationSg = new ec2.SecurityGroup(this, "n8nApplicationSg", {
       vpc,
       description: "Security group for ECS application",
       allowAllOutbound: true,
     });
 
-    const albSg = new ec2.SecurityGroup(this, "ALBSg", {
+    const albSg = new ec2.SecurityGroup(this, "n8nALBSg", {
       vpc,
       description: "Security group for Application Load Balancer",
       allowAllOutbound: true,
@@ -117,7 +117,7 @@ export class N8nStack extends cdk.Stack {
     );
 
     // Secrets
-    const dbSecret = new secretsmanager.Secret(this, "DatabaseSecret", {
+    const dbSecret = new secretsmanager.Secret(this, "n8nDatabaseSecret", {
       description: "Database credentials for n8n",
       generateSecretString: {
         secretStringTemplate: JSON.stringify({ username: "postgres" }),
@@ -127,7 +127,7 @@ export class N8nStack extends cdk.Stack {
       },
     });
 
-    const n8nSecret = new secretsmanager.Secret(this, "N8nSecret", {
+    const n8nSecret = new secretsmanager.Secret(this, "n8nSecret", {
       description: "n8n API key and secrets",
       generateSecretString: {
         secretStringTemplate: JSON.stringify({ apikey: "n8n_api_key" }),
@@ -137,38 +137,48 @@ export class N8nStack extends cdk.Stack {
       },
     });
 
-    // RDS Database
-    const dbSubnetGroup = new rds.SubnetGroup(this, "DatabaseSubnetGroup", {
+    // Aurora Database Cluster
+
+    // Aurora PostgreSQL Cluster
+    const database = new rds.DatabaseCluster(this, "n8nAuroraCluster", {
+      engine: rds.DatabaseClusterEngine.auroraPostgres({
+        version: rds.AuroraPostgresEngineVersion.VER_15_3,
+      }),
+      credentials: rds.Credentials.fromSecret(dbSecret),
+      defaultDatabaseName: "n8n",
       vpc,
-      description: "Subnet group for RDS database",
       vpcSubnets: {
         subnets: [privateSubnetA, privateSubnetB],
       },
-    });
-
-    const database = new rds.DatabaseInstance(this, "PostgreSQLDatabase", {
-      engine: rds.DatabaseInstanceEngine.postgres({
-        version: rds.PostgresEngineVersion.VER_15,
-      }),
-      instanceType: ec2.InstanceType.of(
-        ec2.InstanceClass.BURSTABLE3,
-        props.instanceClass.split(".")[1] as ec2.InstanceSize
-      ),
-      vpc,
-      subnetGroup: dbSubnetGroup,
       securityGroups: [databaseSg],
-      credentials: rds.Credentials.fromSecret(dbSecret),
-      databaseName: "n8n",
-      backupRetention: props.enableBackup
-        ? cdk.Duration.days(7)
-        : cdk.Duration.days(0),
-      deleteAutomatedBackups: !props.enableBackup,
+      backup: props.enableBackup
+        ? {
+            retention: cdk.Duration.days(7),
+            preferredWindow: "03:00-04:00",
+          }
+        : {
+            retention: cdk.Duration.days(1), // Minimum for Aurora
+          },
       deletionProtection: props.environment === "production",
-      multiAz: props.enableMultiAz || false,
       storageEncrypted: true,
-      allocatedStorage: 20,
-      maxAllocatedStorage: 100,
-      enablePerformanceInsights: props.environment !== "development",
+      cloudwatchLogsExports: props.enableLogging ? ["postgresql"] : [],
+      monitoringInterval:
+        props.environment !== "development"
+          ? cdk.Duration.minutes(1)
+          : undefined,
+      writer: rds.ClusterInstance.serverlessV2("writer", {
+        scaleWithWriter: true,
+      }),
+      readers:
+        props.environment === "production" && props.enableMultiAz
+          ? [
+              rds.ClusterInstance.serverlessV2("reader", {
+                scaleWithWriter: true,
+              }),
+            ]
+          : [],
+      serverlessV2MinCapacity: props.environment === "development" ? 0.5 : 0.5,
+      serverlessV2MaxCapacity: props.environment === "development" ? 1 : 4,
     });
 
     // Redis Subnet Group
@@ -193,7 +203,7 @@ export class N8nStack extends cdk.Stack {
     });
 
     // Application Load Balancer
-    this.alb = new elbv2.ApplicationLoadBalancer(this, "N8nALB", {
+    this.alb = new elbv2.ApplicationLoadBalancer(this, "n8nALB", {
       vpc,
       internetFacing: true,
       securityGroup: albSg,
@@ -294,7 +304,7 @@ export class N8nStack extends cdk.Stack {
         N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true",
         N8N_RUNNERS_ENABLED: "true",
         DB_TYPE: "postgresdb",
-        DB_POSTGRESDB_HOST: database.instanceEndpoint.hostname,
+        DB_POSTGRESDB_HOST: database.clusterEndpoint.hostname,
         DB_POSTGRESDB_PORT: "5432",
         DB_POSTGRESDB_DATABASE: "n8n",
         DB_POSTGRESDB_SCHEMA: "public",
