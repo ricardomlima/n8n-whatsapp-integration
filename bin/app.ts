@@ -15,7 +15,8 @@ const environments = {
     accountId: process.env.AWS_ACCOUNT_ID || "066284029583", // placeholder account for synthesis
     region: process.env.AWS_REGION || "us-east-1",
     domain: "avaeran.com",
-    certificateArn: undefined,
+    certificateArn:
+      "arn:aws:acm:us-east-1:066284029583:certificate/d534e510-722f-4920-8c29-cd57ea3f6c6d",
     instanceClass: "db.t3.micro",
     instanceType: "fargate",
     desiredCount: 1,
