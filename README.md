@@ -70,13 +70,10 @@ graph TB
    AWS_ACCOUNT_ID
    PRODUCTION_DOMAIN_NAME
    PRODUCTION_CERTIFICATE_ARN
-   RELEASE_DOMAIN_NAME
-   RELEASE_CERTIFICATE_ARN
    ```
 
 2. **Deploy by pushing to branches**:
    - `dev` → Development environment
-   - `release` → Staging environment
    - `main`/`production` → Production environment
 
 ## 📋 Services Overview
@@ -164,13 +161,6 @@ DOMAIN_NAME=your-domain.com
 - HTTP only
 - Development database settings
 
-### Release (`release` branch)
-
-- Multi-AZ for testing
-- Production-like setup
-- HTTPS with certificate
-- Backup enabled
-
 ### Production (`main` branch)
 
 - Full multi-AZ deployment
@@ -198,7 +188,6 @@ n8n-whatsapp-integration/
 └── .github/
     └── workflows/           # CI/CD pipeline definitions
         ├── deploy-dev.yml
-        ├── deploy-release.yml
         └── deploy-production.yml
 ```
 

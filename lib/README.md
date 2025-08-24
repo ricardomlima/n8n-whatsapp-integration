@@ -20,7 +20,6 @@ The main stack that provisions:
 ## Environment Configurations
 
 - **Development**: Single AZ, minimal resources, HTTP only
-- **Release**: Multi AZ, production-like setup, HTTPS
 - **Production**: Full HA deployment, encrypted storage, backups
 
 ## Usage

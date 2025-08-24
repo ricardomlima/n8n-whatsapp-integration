@@ -24,22 +24,10 @@ const environments = {
     enableBackup: false,
     enableMultiAz: false,
   },
-  release: {
-    accountId: process.env.AWS_ACCOUNT_ID || "066284029583", // placeholder account for synthesis
-    region: process.env.AWS_REGION || "us-east-1",
-    domain: "avaeran.com",
-    certificateArn: process.env.CERTIFICATE_ARN,
-    instanceClass: "db.t3.small",
-    instanceType: "fargate",
-    desiredCount: 2,
-    enableLogging: true,
-    enableBackup: true,
-    enableMultiAz: false,
-  },
   production: {
     accountId: process.env.AWS_ACCOUNT_ID || "066284029583", // placeholder account for synthesis
     region: process.env.AWS_REGION || "us-east-1",
-    domain: process.env.DOMAIN_NAME || "us-east-1",
+    domain: "avaeran.com",
     certificateArn: process.env.CERTIFICATE_ARN,
     instanceClass: "db.t3.medium",
     instanceType: "fargate",
