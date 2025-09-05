@@ -1,20 +1,20 @@
 import * as cdk from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as ecs from "aws-cdk-lib/aws-ecs";
-import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
-import * as route53 from "aws-cdk-lib/aws-route53";
-import * as targets from "aws-cdk-lib/aws-route53-targets";
 import * as rds from "aws-cdk-lib/aws-rds";
 import * as elasticache from "aws-cdk-lib/aws-elasticache";
+import * as route53 from "aws-cdk-lib/aws-route53";
+import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as events from "aws-cdk-lib/aws-events";
+import * as targets from "aws-cdk-lib/aws-events-targets";
 import { Construct } from "constructs";
 
 export interface N8nStackProps extends cdk.StackProps {
   environment: string;
   domain?: string;
-  certificateArn?: string;
   desiredCount: number;
   enableLogging: boolean;
   instanceClass: string;
@@ -24,8 +24,6 @@ export interface N8nStackProps extends cdk.StackProps {
 
 export class N8nStack extends cdk.Stack {
   public readonly service: ecs.FargateService;
-  public readonly targetGroup: elbv2.ApplicationTargetGroup;
-  public readonly alb: elbv2.ApplicationLoadBalancer;
 
   constructor(scope: Construct, id: string, props: N8nStackProps) {
     super(scope, id, props);
@@ -58,12 +56,14 @@ export class N8nStack extends cdk.Stack {
       cdk.Fn.importValue("AvaeranPrivateSubnetBId")
     );
 
-    // Import hosted zone
-    const hostedZone = route53.HostedZone.fromLookup(this, "HostedZone", {
-      domainName: props.domain || "avaeran.com",
-    });
+    // Import hosted zone for domain
+    const hostedZone = props.domain
+      ? route53.HostedZone.fromLookup(this, "HostedZone", {
+          domainName: props.domain,
+        })
+      : undefined;
 
-    // Security Groups
+    // Security Groups (simplified)
     const databaseSg = new ec2.SecurityGroup(this, "n8nDatabaseSg", {
       vpc,
       description: "Security group for RDS database",
@@ -82,13 +82,7 @@ export class N8nStack extends cdk.Stack {
       allowAllOutbound: true,
     });
 
-    const albSg = new ec2.SecurityGroup(this, "n8nALBSg", {
-      vpc,
-      description: "Security group for Application Load Balancer",
-      allowAllOutbound: true,
-    });
-
-    // Security group rules
+    // Security group rules (simplified - direct access)
     databaseSg.addIngressRule(
       applicationSg,
       ec2.Port.tcp(5432),
@@ -101,19 +95,11 @@ export class N8nStack extends cdk.Stack {
       "Allow Redis from application"
     );
 
-    albSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), "Allow HTTP");
-    if (props.certificateArn) {
-      albSg.addIngressRule(
-        ec2.Peer.anyIpv4(),
-        ec2.Port.tcp(443),
-        "Allow HTTPS"
-      );
-    }
-
+    // Allow direct access to n8n (for PoC - restrict IP for production)
     applicationSg.addIngressRule(
-      albSg,
+      ec2.Peer.anyIpv4(), // ⚠️ For PoC only! Change to your IP for security
       ec2.Port.tcp(5678),
-      "Allow n8n from ALB"
+      "Allow direct n8n access"
     );
 
     // Secrets
@@ -151,15 +137,10 @@ export class N8nStack extends cdk.Stack {
         subnets: [privateSubnetA, privateSubnetB],
       },
       securityGroups: [databaseSg],
-      backup: props.enableBackup
-        ? {
-            retention: cdk.Duration.days(7),
-            preferredWindow: "03:00-04:00",
-          }
-        : {
-            retention: cdk.Duration.days(1), // Minimum for Aurora
-          },
-      deletionProtection: props.environment === "production",
+      backup: {
+        retention: cdk.Duration.days(1), // Minimal for PoC
+      },
+      deletionProtection: false, // Allow easy cleanup for PoC
       storageEncrypted: true,
       cloudwatchLogsExports: props.enableLogging ? ["postgresql"] : [],
       monitoringInterval:
@@ -202,52 +183,6 @@ export class N8nStack extends cdk.Stack {
       port: 6379,
     });
 
-    // Application Load Balancer
-    this.alb = new elbv2.ApplicationLoadBalancer(this, "n8nALB", {
-      vpc,
-      internetFacing: true,
-      securityGroup: albSg,
-      vpcSubnets: {
-        subnets: [publicSubnetA, publicSubnetB],
-      },
-    });
-
-    // ALB Listeners
-    let httpsListener: elbv2.ApplicationListener | undefined;
-    let httpListener: elbv2.ApplicationListener;
-
-    if (props.certificateArn) {
-      httpsListener = this.alb.addListener("HttpsListener", {
-        port: 443,
-        protocol: elbv2.ApplicationProtocol.HTTPS,
-        certificates: [elbv2.ListenerCertificate.fromArn(props.certificateArn)],
-        defaultAction: elbv2.ListenerAction.fixedResponse(404, {
-          contentType: "text/plain",
-          messageBody: "Not Found",
-        }),
-      });
-
-      // HTTP listener redirects to HTTPS
-      httpListener = this.alb.addListener("HttpListener", {
-        port: 80,
-        protocol: elbv2.ApplicationProtocol.HTTP,
-        defaultAction: elbv2.ListenerAction.redirect({
-          protocol: "HTTPS",
-          port: "443",
-          permanent: true,
-        }),
-      });
-    } else {
-      httpListener = this.alb.addListener("HttpListener", {
-        port: 80,
-        protocol: elbv2.ApplicationProtocol.HTTP,
-        defaultAction: elbv2.ListenerAction.fixedResponse(404, {
-          contentType: "text/plain",
-          messageBody: "Not Found",
-        }),
-      });
-    }
-
     // ECS Cluster
     const cluster = new ecs.Cluster(this, "N8nCluster", {
       vpc,
@@ -275,20 +210,20 @@ export class N8nStack extends cdk.Stack {
 
     // Log Group
     const logGroup = new logs.LogGroup(this, "N8nLogGroup", {
-      retention: logs.RetentionDays.ONE_MONTH,
+      retention: logs.RetentionDays.ONE_WEEK, // Shorter for PoC
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     // Grant task execution role access to log group
     logGroup.grantWrite(taskExecutionRole);
 
-    // Task Definition
+    // Task Definition (reduced resources for PoC)
     const taskDefinition = new ecs.FargateTaskDefinition(
       this,
       "N8nTaskDefinition",
       {
-        memoryLimitMiB: 2048,
-        cpu: 1024,
+        memoryLimitMiB: 1024, // Reduced from 2048
+        cpu: 512, // Reduced from 1024
         executionRole: taskExecutionRole,
         taskRole: taskRole,
       }
@@ -297,7 +232,7 @@ export class N8nStack extends cdk.Stack {
     // n8n Container
     const n8nContainer = taskDefinition.addContainer("n8n", {
       image: ecs.ContainerImage.fromRegistry("docker.n8n.io/n8nio/n8n:latest"),
-      memoryLimitMiB: 2048,
+      memoryLimitMiB: 1024, // Reduced from 2048
       environment: {
         GENERIC_TIMEZONE: "America/Sao_Paulo",
         TZ: "America/Sao_Paulo",
@@ -310,13 +245,13 @@ export class N8nStack extends cdk.Stack {
         DB_POSTGRESDB_SCHEMA: "public",
         N8N_HOST: "0.0.0.0",
         N8N_PORT: "5678",
-        N8N_PROTOCOL: props.certificateArn ? "https" : "http",
+        N8N_PROTOCOL: "http", // Simplified for PoC
         NODE_ENV: props.environment,
         QUEUE_BULL_REDIS_HOST: redisCluster.attrRedisEndpointAddress,
         QUEUE_BULL_REDIS_PORT: "6379",
         WEBHOOK_URL: props.domain
-          ? `https://n8n.${props.domain}/webhook`
-          : "http://localhost:5678/webhook",
+          ? `http://n8n.${props.domain}:5678/webhook`
+          : "http://TASK_PUBLIC_IP:5678/webhook", // Fallback if no domain
         N8N_CORS_ORIGIN: "*",
         N8N_BASIC_AUTH_ACTIVE: "true",
         N8N_BASIC_AUTH_USER: "admin",
@@ -344,79 +279,129 @@ export class N8nStack extends cdk.Stack {
       protocol: ecs.Protocol.TCP,
     });
 
-    // ECS Service
+    // ECS Service (key changes - public subnets + public IP)
     this.service = new ecs.FargateService(this, "N8nService", {
       cluster,
       taskDefinition,
       desiredCount: props.desiredCount,
-      assignPublicIp: false,
+      assignPublicIp: true, // ← Key change: Enable public IP
       securityGroups: [applicationSg],
       vpcSubnets: {
-        subnets: [privateSubnetA, privateSubnetB],
+        subnets: [publicSubnetA, publicSubnetB], // ← Key change: Use public subnets
       },
     });
 
-    // Target Group
-    this.targetGroup = new elbv2.ApplicationTargetGroup(
-      this,
-      "N8nTargetGroup",
-      {
-        vpc,
-        port: 5678,
-        protocol: elbv2.ApplicationProtocol.HTTP,
-        targetType: elbv2.TargetType.IP,
-        healthCheck: {
-          path: "/healthz",
-          healthyHttpCodes: "200",
-          interval: cdk.Duration.seconds(30),
-          timeout: cdk.Duration.seconds(5),
-          healthyThresholdCount: 2,
-          unhealthyThresholdCount: 3,
-        },
-      }
-    );
-
-    // Register service with target group
-    this.service.attachToApplicationTargetGroup(this.targetGroup);
-
-    // Add listener rules
-    const mainListener = httpsListener || httpListener;
-
-    mainListener.addAction("N8nAction", {
-      priority: 100,
-      conditions: [
-        elbv2.ListenerCondition.hostHeaders([`n8n.${props.domain}`]),
-      ],
-      action: elbv2.ListenerAction.forward([this.targetGroup]),
-    });
-
-    // Route 53 Record for n8n subdomain
-    if (props.domain) {
-      new route53.ARecord(this, "N8nSubdomainRecord", {
+    // Automated DNS Update System (if domain is provided)
+    if (hostedZone && props.domain) {
+      // Create initial Route 53 A record with placeholder IP
+      const aRecord = new route53.ARecord(this, "N8nARecord", {
         zone: hostedZone,
-        target: route53.RecordTarget.fromAlias(
-          new targets.LoadBalancerTarget(this.alb)
-        ),
-        recordName: `n8n.${props.domain}`,
+        recordName: "n8n",
+        target: route53.RecordTarget.fromIpAddresses("1.1.1.1"), // Placeholder - will be auto-updated
+        ttl: cdk.Duration.seconds(60), // Short TTL for quick updates
+        comment: "n8n application - Auto-updated by Lambda",
+      });
+
+      // Lambda function to automatically update DNS when ECS task changes
+      const dnsUpdateFunction = new lambda.Function(this, "DnsUpdateFunction", {
+        runtime: lambda.Runtime.PYTHON_3_11,
+        handler: "index.handler",
+        timeout: cdk.Duration.minutes(2),
+        code: lambda.Code.fromAsset("lambda/dns-updater"),
+        environment: {
+          HOSTED_ZONE_ID: hostedZone.hostedZoneId,
+          DOMAIN: props.domain,
+          RECORD_NAME: "n8n", // Subdomain name
+        },
+        description:
+          "Automatically updates Route 53 DNS records when ECS tasks change state",
+      });
+
+      // Grant Lambda permissions to update Route 53
+      dnsUpdateFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["route53:ChangeResourceRecordSets", "route53:GetChange"],
+          resources: [
+            `arn:aws:route53:::hostedzone/${hostedZone.hostedZoneId}`,
+            "arn:aws:route53:::change/*",
+          ],
+        })
+      );
+
+      // Grant Lambda permissions to describe ECS tasks and ENIs
+      dnsUpdateFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["ecs:DescribeTasks", "ec2:DescribeNetworkInterfaces"],
+          resources: ["*"],
+        })
+      );
+
+      // EventBridge rule to trigger Lambda on ECS task state changes
+      const ecsTaskRule = new events.Rule(this, "EcsTaskStateRule", {
+        description: "Trigger DNS update when n8n ECS task starts running",
+        eventPattern: {
+          source: ["aws.ecs"],
+          detailType: ["ECS Task State Change"],
+          detail: {
+            clusterArn: [cluster.clusterArn],
+            group: [`service:${this.service.serviceName}`],
+            lastStatus: ["RUNNING"],
+          },
+        },
+      });
+
+      // Add Lambda as target for the EventBridge rule
+      ecsTaskRule.addTarget(new targets.LambdaFunction(dnsUpdateFunction));
+
+      // Add CloudWatch log group for Lambda with proper retention
+      new logs.LogGroup(this, "DnsUpdateFunctionLogGroup", {
+        logGroupName: `/aws/lambda/${dnsUpdateFunction.functionName}`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
       });
     }
 
-    // Outputs
-    new cdk.CfnOutput(this, "N8nUrl", {
-      value: props.domain
-        ? `https://n8n.${props.domain}`
-        : `http://${this.alb.loadBalancerDnsName}`,
-      description: "n8n URL",
-    });
-
+    // Outputs (simplified)
     new cdk.CfnOutput(this, "N8nServiceName", {
       value: this.service.serviceName,
-      exportName: `${props.environment}-N8nServiceName`,
+      description: "n8n ECS Service Name",
     });
 
-    new cdk.CfnOutput(this, "N8nALBDnsName", {
-      value: this.alb.loadBalancerDnsName,
-      exportName: `${props.environment}-N8nALBDnsName`,
+    new cdk.CfnOutput(this, "DatabaseEndpoint", {
+      value: database.clusterEndpoint.hostname,
+      description: "Aurora Database Endpoint",
+    });
+
+    new cdk.CfnOutput(this, "RedisEndpoint", {
+      value: redisCluster.attrRedisEndpointAddress,
+      description: "Redis Cache Endpoint",
+    });
+
+    if (props.domain) {
+      new cdk.CfnOutput(this, "DomainURL", {
+        value: `http://n8n.${props.domain}:5678`,
+        description: "n8n Application URL (DNS auto-updated)",
+      });
+
+      new cdk.CfnOutput(this, "AutoDnsInfo", {
+        value: `DNS automatically updates when ECS task starts! Wait 1-2 minutes after deployment, then access: http://n8n.${props.domain}:5678`,
+        description: "Automated DNS Information",
+      });
+    }
+
+    new cdk.CfnOutput(this, "Instructions", {
+      value: props.domain
+        ? `🚀 Fully Automated! Access n8n at: http://n8n.${props.domain}:5678 (user: admin, password: check Secrets Manager)`
+        : "Get task public IP from ECS console, then access n8n at http://TASK_IP:5678 (user: admin, password: check Secrets Manager)",
+      description: "Access Instructions",
+    });
+
+    new cdk.CfnOutput(this, "LoginCredentials", {
+      value:
+        "Username: admin | Password: Check AWS Secrets Manager for 'n8nDatabaseSecret'",
+      description: "n8n Login Credentials",
     });
   }
 }
