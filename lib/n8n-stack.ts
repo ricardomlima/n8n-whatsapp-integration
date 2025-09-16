@@ -7,9 +7,7 @@ import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as rds from "aws-cdk-lib/aws-rds";
 import * as elasticache from "aws-cdk-lib/aws-elasticache";
 import * as route53 from "aws-cdk-lib/aws-route53";
-import * as lambda from "aws-cdk-lib/aws-lambda";
-import * as events from "aws-cdk-lib/aws-events";
-import * as targets from "aws-cdk-lib/aws-events-targets";
+import * as servicediscovery from "aws-cdk-lib/aws-servicediscovery";
 import { Construct } from "constructs";
 
 export interface N8nStackProps extends cdk.StackProps {
@@ -279,87 +277,66 @@ export class N8nStack extends cdk.Stack {
       protocol: ecs.Protocol.TCP,
     });
 
-    // ECS Service (key changes - public subnets + public IP)
+    // Cloud Map Service Discovery (if domain is provided)
+    let cloudMapService: servicediscovery.Service | undefined;
+
+    if (props.domain) {
+      // Import existing shared service discovery namespace
+      const namespaceId = cdk.Fn.importValue("NamespaceId");
+      const namespaceName = cdk.Fn.importValue("NamespaceName");
+
+      // Create n8n service in the shared namespace
+      cloudMapService = new servicediscovery.Service(
+        this,
+        "N8nCloudMapService",
+        {
+          namespace:
+            servicediscovery.PrivateDnsNamespace.fromPrivateDnsNamespaceAttributes(
+              this,
+              "ImportedNamespace",
+              {
+                namespaceId: namespaceId,
+                namespaceName: namespaceName,
+                namespaceArn: `arn:aws:servicediscovery:${this.region}:${this.account}:namespace/${namespaceId}`,
+              }
+            ),
+          name: "n8n",
+          dnsRecordType: servicediscovery.DnsRecordType.A,
+          dnsTtl: cdk.Duration.seconds(60),
+          description: "n8n workflow automation service",
+        }
+      );
+    }
+
+    // ECS Service with Cloud Map integration
     this.service = new ecs.FargateService(this, "N8nService", {
       cluster,
       taskDefinition,
       desiredCount: props.desiredCount,
-      assignPublicIp: true, // ← Key change: Enable public IP
+      assignPublicIp: true,
       securityGroups: [applicationSg],
       vpcSubnets: {
-        subnets: [publicSubnetA, publicSubnetB], // ← Key change: Use public subnets
+        subnets: [publicSubnetA, publicSubnetB],
       },
+      // Register with Cloud Map if available
+      cloudMapOptions: cloudMapService
+        ? {
+            cloudMapNamespace: cloudMapService.namespace,
+            name: "n8n",
+          }
+        : undefined,
     });
 
-    // Automated DNS Update System (if domain is provided)
-    if (hostedZone && props.domain) {
-      // Create initial Route 53 A record with placeholder IP
-      const aRecord = new route53.ARecord(this, "N8nARecord", {
+    // Create public DNS CNAME record pointing to Cloud Map (if domain is provided)
+    if (hostedZone && props.domain && cloudMapService) {
+      const namespaceName = cdk.Fn.importValue("NamespaceName");
+
+      new route53.CnameRecord(this, "N8nCnameRecord", {
         zone: hostedZone,
         recordName: "n8n",
-        target: route53.RecordTarget.fromIpAddresses("1.1.1.1"), // Placeholder - will be auto-updated
-        ttl: cdk.Duration.seconds(60), // Short TTL for quick updates
-        comment: "n8n application - Auto-updated by Lambda",
-      });
-
-      // Lambda function to automatically update DNS when ECS task changes
-      const dnsUpdateFunction = new lambda.Function(this, "DnsUpdateFunction", {
-        runtime: lambda.Runtime.PYTHON_3_11,
-        handler: "index.handler",
-        timeout: cdk.Duration.minutes(2),
-        code: lambda.Code.fromAsset("lambda/dns-updater"),
-        environment: {
-          HOSTED_ZONE_ID: hostedZone.hostedZoneId,
-          DOMAIN: props.domain,
-          RECORD_NAME: "n8n", // Subdomain name
-        },
-        description:
-          "Automatically updates Route 53 DNS records when ECS tasks change state",
-      });
-
-      // Grant Lambda permissions to update Route 53
-      dnsUpdateFunction.addToRolePolicy(
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: ["route53:ChangeResourceRecordSets", "route53:GetChange"],
-          resources: [
-            `arn:aws:route53:::hostedzone/${hostedZone.hostedZoneId}`,
-            "arn:aws:route53:::change/*",
-          ],
-        })
-      );
-
-      // Grant Lambda permissions to describe ECS tasks and ENIs
-      dnsUpdateFunction.addToRolePolicy(
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: ["ecs:DescribeTasks", "ec2:DescribeNetworkInterfaces"],
-          resources: ["*"],
-        })
-      );
-
-      // EventBridge rule to trigger Lambda on ECS task state changes
-      const ecsTaskRule = new events.Rule(this, "EcsTaskStateRule", {
-        description: "Trigger DNS update when n8n ECS task starts running",
-        eventPattern: {
-          source: ["aws.ecs"],
-          detailType: ["ECS Task State Change"],
-          detail: {
-            clusterArn: [cluster.clusterArn],
-            group: [`service:${this.service.serviceName}`],
-            lastStatus: ["RUNNING"],
-          },
-        },
-      });
-
-      // Add Lambda as target for the EventBridge rule
-      ecsTaskRule.addTarget(new targets.LambdaFunction(dnsUpdateFunction));
-
-      // Add CloudWatch log group for Lambda with proper retention
-      new logs.LogGroup(this, "DnsUpdateFunctionLogGroup", {
-        logGroupName: `/aws/lambda/${dnsUpdateFunction.functionName}`,
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        domainName: `n8n.${namespaceName}`, // Points to Cloud Map service in shared namespace
+        ttl: cdk.Duration.minutes(5),
+        comment: "n8n application - Points to Cloud Map service discovery",
       });
     }
 
@@ -380,20 +357,27 @@ export class N8nStack extends cdk.Stack {
     });
 
     if (props.domain) {
+      const namespaceName = cdk.Fn.importValue("NamespaceName");
+
       new cdk.CfnOutput(this, "DomainURL", {
         value: `http://n8n.${props.domain}:5678`,
-        description: "n8n Application URL (DNS auto-updated)",
+        description: "n8n Application URL (via Cloud Map service discovery)",
       });
 
-      new cdk.CfnOutput(this, "AutoDnsInfo", {
-        value: `DNS automatically updates when ECS task starts! Wait 1-2 minutes after deployment, then access: http://n8n.${props.domain}:5678`,
-        description: "Automated DNS Information",
+      new cdk.CfnOutput(this, "CloudMapInfo", {
+        value: `Service automatically registers with Cloud Map at n8n.${namespaceName} and resolves to n8n.${props.domain}:5678`,
+        description: "Cloud Map Service Discovery Information",
+      });
+
+      new cdk.CfnOutput(this, "ServiceDiscoveryDomain", {
+        value: `n8n.${namespaceName}`,
+        description: "Internal Cloud Map service discovery domain",
       });
     }
 
     new cdk.CfnOutput(this, "Instructions", {
       value: props.domain
-        ? `🚀 Fully Automated! Access n8n at: http://n8n.${props.domain}:5678 (user: admin, password: check Secrets Manager)`
+        ? `🚀 Automated with Cloud Map! Access n8n at: http://n8n.${props.domain}:5678 (user: admin, password: check Secrets Manager)`
         : "Get task public IP from ECS console, then access n8n at http://TASK_IP:5678 (user: admin, password: check Secrets Manager)",
       description: "Access Instructions",
     });
