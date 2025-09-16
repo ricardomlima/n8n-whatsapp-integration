@@ -32,7 +32,7 @@ jobs:
         env:
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         run: |
-          npx cdk synth n8n-whatsapp-${{ env.ENVIRONMENT }} \
+          npx cdk synth n8n-${{ env.ENVIRONMENT }} \
             --context environment=${{ env.ENVIRONMENT }}
 
   deploy:
