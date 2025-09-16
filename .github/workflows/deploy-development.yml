@@ -65,7 +65,7 @@ jobs:
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         run: |
           npx cdk bootstrap aws://${{ secrets.AWS_ACCOUNT_ID }}/${{ env.AWS_REGION }}
-          npx cdk deploy n8n-whatsapp-${{ env.ENVIRONMENT }} \
+          npx cdk deploy n8n-${{ env.ENVIRONMENT }} \
             --context environment=${{ env.ENVIRONMENT }} \
             --require-approval never \
             --outputs-file outputs.json
