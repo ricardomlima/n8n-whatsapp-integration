@@ -69,7 +69,7 @@ jobs:
           AWS_DEFAULT_REGION: "us-east-1"
           STAGE: ${{ github.ref_name }}
           COMMIT_HASH: ${{ github.sha }}
-        run: npm run bootstrap && npm run cdk deploy -- --context environment=${{ env.ENVIRONMENT }} --require-approval never --outputs-file outputs.json
+        run: npm run cdk bootstrap && npm run cdk deploy -- --context environment=${{ env.ENVIRONMENT }} --require-approval never --outputs-file outputs.json
 
       - name: Save deployment outputs
         uses: actions/upload-artifact@v4
