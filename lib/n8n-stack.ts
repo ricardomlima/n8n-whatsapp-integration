@@ -282,8 +282,8 @@ export class N8nStack extends cdk.Stack {
 
     if (props.domain) {
       // Import existing shared service discovery namespace
-      const namespaceId = cdk.Fn.importValue("NamespaceId");
-      const namespaceName = cdk.Fn.importValue("NamespaceName");
+      const namespaceId = cdk.Fn.importValue("AvaeranNamespaceId");
+      const namespaceName = cdk.Fn.importValue("AvaeranNamespaceName");
 
       // Create n8n service in the shared namespace
       cloudMapService = new servicediscovery.Service(
