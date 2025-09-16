@@ -11,34 +11,33 @@ env:
   ENVIRONMENT: development
 
 jobs:
-  validate:
-    name: Validate Infrastructure
-    runs-on: ubuntu-latest
+  # validate:
+  #   name: Validate Infrastructure
+  #   runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "18"
-          cache: "npm"
+  #     - name: Setup Node.js
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: "18"
+  #         cache: "npm"
 
-      - name: Install CDK dependencies
-        run: npm ci
+  #     - name: Install CDK dependencies
+  #       run: npm ci
 
-      - name: CDK Synthesize
-        env:
-          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        run: |
-          npx cdk synth n8n-${{ env.ENVIRONMENT }} \
-            --context environment=${{ env.ENVIRONMENT }}
+  #     - name: CDK Synthesize
+  #       env:
+  #         AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  #       run: |
+  #         npx cdk synth n8n-${{ env.ENVIRONMENT }} \
+  #           --context environment=${{ env.ENVIRONMENT }}
 
   deploy:
     name: Deploy Infrastructure
     runs-on: ubuntu-latest
-    needs: validate
 
     steps:
       - name: Checkout code
@@ -50,25 +49,27 @@ jobs:
           node-version: "18"
           cache: "npm"
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
       - name: Install CDK dependencies
         run: npm ci
 
-      - name: Deploy CDK stack
+      # - name: Deploy CDK stack
+      #   env:
+      #     AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      #   run: |
+      #     npx cdk bootstrap aws://${{ secrets.AWS_ACCOUNT_ID }}/${{ env.AWS_REGION }}
+      #     npx cdk deploy n8n-${{ env.ENVIRONMENT }} \
+      #       --context environment=${{ env.ENVIRONMENT }} \
+      #       --require-approval never \
+      #       --outputs-file outputs.json
+
+      - name: Deploy to AWS
         env:
-          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        run: |
-          npx cdk bootstrap aws://${{ secrets.AWS_ACCOUNT_ID }}/${{ env.AWS_REGION }}
-          npx cdk deploy n8n-${{ env.ENVIRONMENT }} \
-            --context environment=${{ env.ENVIRONMENT }} \
-            --require-approval never \
-            --outputs-file outputs.json
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: "us-east-1"
+          STAGE: ${{ github.ref_name }}
+          COMMIT_HASH: ${{ github.sha }}
+        run: npm run bootstrap && npm run cdk deploy -- --context environment=${{ env.ENVIRONMENT }} --require-approval never --outputs-file outputs.json
 
       - name: Save deployment outputs
         uses: actions/upload-artifact@v4
