@@ -357,7 +357,7 @@ export class N8nStack extends cdk.Stack {
     });
 
     if (props.domain) {
-      const namespaceName = cdk.Fn.importValue("NamespaceName");
+      const namespaceName = cdk.Fn.importValue("AvaeranNamespaceName");
 
       new cdk.CfnOutput(this, "DomainURL", {
         value: `http://n8n.${props.domain}:5678`,
