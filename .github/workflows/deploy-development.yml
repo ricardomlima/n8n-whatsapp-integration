@@ -4,37 +4,12 @@ on:
   push:
     branches:
       - development
-  workflow_dispatch:
 
 env:
   AWS_REGION: us-east-1
   ENVIRONMENT: development
 
 jobs:
-  # validate:
-  #   name: Validate Infrastructure
-  #   runs-on: ubuntu-latest
-
-  #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@v4
-
-  #     - name: Setup Node.js
-  #       uses: actions/setup-node@v4
-  #       with:
-  #         node-version: "18"
-  #         cache: "npm"
-
-  #     - name: Install CDK dependencies
-  #       run: npm ci
-
-  #     - name: CDK Synthesize
-  #       env:
-  #         AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-  #       run: |
-  #         npx cdk synth n8n-${{ env.ENVIRONMENT }} \
-  #           --context environment=${{ env.ENVIRONMENT }}
-
   deploy:
     name: Deploy Infrastructure
     runs-on: ubuntu-latest
@@ -51,16 +26,6 @@ jobs:
 
       - name: Install CDK dependencies
         run: npm ci
-
-      # - name: Deploy CDK stack
-      #   env:
-      #     AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-      #   run: |
-      #     npx cdk bootstrap aws://${{ secrets.AWS_ACCOUNT_ID }}/${{ env.AWS_REGION }}
-      #     npx cdk deploy n8n-${{ env.ENVIRONMENT }} \
-      #       --context environment=${{ env.ENVIRONMENT }} \
-      #       --require-approval never \
-      #       --outputs-file outputs.json
 
       - name: Deploy to AWS
         env:
