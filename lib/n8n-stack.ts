@@ -329,7 +329,7 @@ export class N8nStack extends cdk.Stack {
 
     // Create public DNS CNAME record pointing to Cloud Map (if domain is provided)
     if (hostedZone && props.domain && cloudMapService) {
-      const namespaceName = cdk.Fn.importValue("NamespaceName");
+      const namespaceName = cdk.Fn.importValue("AvaeranNamespaceName");
 
       new route53.CnameRecord(this, "N8nCnameRecord", {
         zone: hostedZone,
