@@ -322,7 +322,7 @@ export class N8nStack extends cdk.Stack {
       cloudMapOptions: cloudMapService
         ? {
             cloudMapNamespace: cloudMapService.namespace,
-            name: "n8n",
+            name: "n8n-ricardo",
           }
         : undefined,
     });
