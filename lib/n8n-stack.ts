@@ -7,7 +7,6 @@ import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as rds from "aws-cdk-lib/aws-rds";
 import * as elasticache from "aws-cdk-lib/aws-elasticache";
 import * as route53 from "aws-cdk-lib/aws-route53";
-import * as servicediscovery from "aws-cdk-lib/aws-servicediscovery";
 import { Construct } from "constructs";
 
 export interface N8nStackProps extends cdk.StackProps {
@@ -277,38 +276,7 @@ export class N8nStack extends cdk.Stack {
       protocol: ecs.Protocol.TCP,
     });
 
-    // Cloud Map Service Discovery (if domain is provided)
-    let cloudMapService: servicediscovery.Service | undefined;
-
-    if (props.domain) {
-      // Import existing shared service discovery namespace
-      const namespaceId = cdk.Fn.importValue("AvaeranNamespaceId");
-      const namespaceName = cdk.Fn.importValue("AvaeranNamespaceName");
-
-      // Create n8n service in the shared namespace
-      cloudMapService = new servicediscovery.Service(
-        this,
-        "N8nCloudMapService",
-        {
-          namespace:
-            servicediscovery.PrivateDnsNamespace.fromPrivateDnsNamespaceAttributes(
-              this,
-              "ImportedNamespace",
-              {
-                namespaceId: namespaceId,
-                namespaceName: namespaceName,
-                namespaceArn: `arn:aws:servicediscovery:${this.region}:${this.account}:namespace/${namespaceId}`,
-              }
-            ),
-          name: "n8n",
-          dnsRecordType: servicediscovery.DnsRecordType.A,
-          dnsTtl: cdk.Duration.seconds(60),
-          description: "n8n workflow automation service",
-        }
-      );
-    }
-
-    // ECS Service with Cloud Map integration
+    // ECS Service (simplified - no Cloud Map)
     this.service = new ecs.FargateService(this, "N8nService", {
       cluster,
       taskDefinition,
@@ -318,25 +286,17 @@ export class N8nStack extends cdk.Stack {
       vpcSubnets: {
         subnets: [publicSubnetA, publicSubnetB],
       },
-      // Register with Cloud Map if available
-      cloudMapOptions: cloudMapService
-        ? {
-            cloudMapNamespace: cloudMapService.namespace,
-            name: "n8n-ricardo",
-          }
-        : undefined,
+      // No Cloud Map integration - keep it simple
     });
 
-    // Create public DNS CNAME record pointing to Cloud Map (if domain is provided)
-    if (hostedZone && props.domain && cloudMapService) {
-      const namespaceName = cdk.Fn.importValue("AvaeranNamespaceName");
-
-      new route53.CnameRecord(this, "N8nCnameRecord", {
+    // Create simple A record for public access (if domain is provided)
+    if (hostedZone && props.domain) {
+      new route53.ARecord(this, "N8nARecord", {
         zone: hostedZone,
         recordName: "n8n",
-        domainName: `n8n.${namespaceName}`, // Points to Cloud Map service in shared namespace
-        ttl: cdk.Duration.minutes(5),
-        comment: "n8n application - Points to Cloud Map service discovery",
+        target: route53.RecordTarget.fromIpAddresses("1.1.1.1"), // Placeholder - update with actual task IP
+        ttl: cdk.Duration.minutes(1), // Short TTL for easy updates
+        comment: "n8n application - Update with actual ECS task public IP",
       });
     }
 
@@ -357,27 +317,21 @@ export class N8nStack extends cdk.Stack {
     });
 
     if (props.domain) {
-      const namespaceName = cdk.Fn.importValue("AvaeranNamespaceName");
-
       new cdk.CfnOutput(this, "DomainURL", {
         value: `http://n8n.${props.domain}:5678`,
-        description: "n8n Application URL (via Cloud Map service discovery)",
+        description: "n8n Application URL",
       });
 
-      new cdk.CfnOutput(this, "CloudMapInfo", {
-        value: `Service automatically registers with Cloud Map at n8n.${namespaceName} and resolves to n8n.${props.domain}:5678`,
-        description: "Cloud Map Service Discovery Information",
-      });
-
-      new cdk.CfnOutput(this, "ServiceDiscoveryDomain", {
-        value: `n8n.${namespaceName}`,
-        description: "Internal Cloud Map service discovery domain",
+      new cdk.CfnOutput(this, "DnsSetupInstructions", {
+        value:
+          "1. Deploy stack → 2. Get task IP from ECS console → 3. Update Route 53 A record 'n8n' with task IP → 4. Access n8n via domain",
+        description: "DNS Setup Steps",
       });
     }
 
     new cdk.CfnOutput(this, "Instructions", {
       value: props.domain
-        ? `🚀 Automated with Cloud Map! Access n8n at: http://n8n.${props.domain}:5678 (user: admin, password: check Secrets Manager)`
+        ? `After updating DNS A record: Access n8n at http://n8n.${props.domain}:5678 (user: admin, password: check Secrets Manager)`
         : "Get task public IP from ECS console, then access n8n at http://TASK_IP:5678 (user: admin, password: check Secrets Manager)",
       description: "Access Instructions",
     });
