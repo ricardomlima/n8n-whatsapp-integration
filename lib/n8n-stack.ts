@@ -7,6 +7,8 @@ import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as rds from "aws-cdk-lib/aws-rds";
 import * as elasticache from "aws-cdk-lib/aws-elasticache";
 import * as route53 from "aws-cdk-lib/aws-route53";
+import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
+import * as targets from "aws-cdk-lib/aws-route53-targets";
 import { Construct } from "constructs";
 
 export interface N8nStackProps extends cdk.StackProps {
@@ -21,6 +23,8 @@ export interface N8nStackProps extends cdk.StackProps {
 
 export class N8nStack extends cdk.Stack {
   public readonly service: ecs.FargateService;
+  public readonly targetGroup: elbv2.ApplicationTargetGroup;
+  public readonly alb: elbv2.ApplicationLoadBalancer;
 
   constructor(scope: Construct, id: string, props: N8nStackProps) {
     super(scope, id, props);
@@ -60,7 +64,13 @@ export class N8nStack extends cdk.Stack {
         })
       : undefined;
 
-    // Security Groups (simplified)
+    // Security Groups
+    const albSg = new ec2.SecurityGroup(this, "ALBSecurityGroup", {
+      vpc,
+      description: "Security group for Application Load Balancer",
+      allowAllOutbound: true,
+    });
+
     const databaseSg = new ec2.SecurityGroup(this, "n8nDatabaseSg", {
       vpc,
       description: "Security group for RDS database",
@@ -79,24 +89,33 @@ export class N8nStack extends cdk.Stack {
       allowAllOutbound: true,
     });
 
-    // Security group rules (simplified - direct access)
+    // Security group rules
+    // ALB accepts HTTP traffic from internet
+    albSg.addIngressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(80),
+      "Allow HTTP from internet"
+    );
+
+    // Application accepts traffic from ALB only
+    applicationSg.addIngressRule(
+      albSg,
+      ec2.Port.tcp(5678),
+      "Allow n8n from ALB"
+    );
+
+    // Database accepts traffic from application only
     databaseSg.addIngressRule(
       applicationSg,
       ec2.Port.tcp(5432),
       "Allow PostgreSQL from application"
     );
 
+    // Redis accepts traffic from application only
     redisSg.addIngressRule(
       applicationSg,
       ec2.Port.tcp(6379),
       "Allow Redis from application"
-    );
-
-    // Allow direct access to n8n (for PoC - restrict IP for production)
-    applicationSg.addIngressRule(
-      ec2.Peer.anyIpv4(), // ⚠️ For PoC only! Change to your IP for security
-      ec2.Port.tcp(5678),
-      "Allow direct n8n access"
     );
 
     // Secrets
@@ -155,7 +174,7 @@ export class N8nStack extends cdk.Stack {
               }),
             ]
           : [],
-      serverlessV2MinCapacity: props.environment === "development" ? 0.5 : 0.5,
+      serverlessV2MinCapacity: 0.5, // Same for all environments
       serverlessV2MaxCapacity: props.environment === "development" ? 1 : 4,
     });
 
@@ -178,6 +197,16 @@ export class N8nStack extends cdk.Stack {
       cacheSubnetGroupName: redisSubnetGroup.ref,
       engineVersion: "7.0",
       port: 6379,
+    });
+
+    // Application Load Balancer
+    this.alb = new elbv2.ApplicationLoadBalancer(this, "N8nALB", {
+      vpc,
+      internetFacing: true,
+      securityGroup: albSg,
+      vpcSubnets: {
+        subnets: [publicSubnetA, publicSubnetB], // ALB in public subnets
+      },
     });
 
     // ECS Cluster
@@ -247,8 +276,8 @@ export class N8nStack extends cdk.Stack {
         QUEUE_BULL_REDIS_HOST: redisCluster.attrRedisEndpointAddress,
         QUEUE_BULL_REDIS_PORT: "6379",
         WEBHOOK_URL: props.domain
-          ? `http://n8n.${props.domain}:5678/webhook`
-          : "http://TASK_PUBLIC_IP:5678/webhook", // Fallback if no domain
+          ? `http://n8n.${props.domain}/webhook`
+          : `http://${this.alb.loadBalancerDnsName}/webhook`,
         N8N_CORS_ORIGIN: "*",
         N8N_BASIC_AUTH_ACTIVE: "true",
         N8N_BASIC_AUTH_USER: "admin",
@@ -276,31 +305,69 @@ export class N8nStack extends cdk.Stack {
       protocol: ecs.Protocol.TCP,
     });
 
-    // ECS Service (simplified - no Cloud Map)
+    // ECS Service (NAT Gateway approach - private subnets)
     this.service = new ecs.FargateService(this, "N8nService", {
       cluster,
       taskDefinition,
       desiredCount: props.desiredCount,
-      assignPublicIp: true,
+      assignPublicIp: false, // ← No public IP needed with NAT Gateway
       securityGroups: [applicationSg],
       vpcSubnets: {
-        subnets: [publicSubnetA, publicSubnetB],
+        subnets: [privateSubnetA, privateSubnetB], // ← Private subnets with NAT Gateway
       },
-      // No Cloud Map integration - keep it simple
     });
 
-    // Create simple A record for public access (if domain is provided)
+    // Target Group for ALB
+    this.targetGroup = new elbv2.ApplicationTargetGroup(
+      this,
+      "N8nTargetGroup",
+      {
+        vpc,
+        port: 5678,
+        protocol: elbv2.ApplicationProtocol.HTTP,
+        targetType: elbv2.TargetType.IP,
+        healthCheck: {
+          enabled: true,
+          path: "/healthz",
+          protocol: elbv2.Protocol.HTTP,
+          port: "5678",
+          healthyHttpCodes: "200",
+          interval: cdk.Duration.seconds(30),
+          timeout: cdk.Duration.seconds(5),
+          unhealthyThresholdCount: 3,
+          healthyThresholdCount: 2,
+        },
+      }
+    );
+
+    // Register ECS service with target group
+    this.service.attachToApplicationTargetGroup(this.targetGroup);
+
+    // ALB Listener
+    this.alb.addListener("N8nListener", {
+      port: 80,
+      protocol: elbv2.ApplicationProtocol.HTTP,
+      defaultTargetGroups: [this.targetGroup],
+    });
+
+    // Route 53 Alias Record (if domain provided)
     if (hostedZone && props.domain) {
-      new route53.ARecord(this, "N8nARecord", {
+      new route53.ARecord(this, "N8nAliasRecord", {
         zone: hostedZone,
         recordName: "n8n",
-        target: route53.RecordTarget.fromIpAddresses("1.1.1.1"), // Placeholder - update with actual task IP
-        ttl: cdk.Duration.minutes(1), // Short TTL for easy updates
-        comment: "n8n application - Update with actual ECS task public IP",
+        target: route53.RecordTarget.fromAlias(
+          new targets.LoadBalancerTarget(this.alb)
+        ),
+        comment: "n8n application via Application Load Balancer",
       });
     }
 
-    // Outputs (simplified)
+    // Outputs
+    new cdk.CfnOutput(this, "LoadBalancerDNS", {
+      value: this.alb.loadBalancerDnsName,
+      description: "Application Load Balancer DNS Name",
+    });
+
     new cdk.CfnOutput(this, "N8nServiceName", {
       value: this.service.serviceName,
       description: "n8n ECS Service Name",
@@ -317,22 +384,21 @@ export class N8nStack extends cdk.Stack {
     });
 
     if (props.domain) {
-      new cdk.CfnOutput(this, "DomainURL", {
-        value: `http://n8n.${props.domain}:5678`,
+      new cdk.CfnOutput(this, "ApplicationURL", {
+        value: `http://n8n.${props.domain}`,
         description: "n8n Application URL",
-      });
-
-      new cdk.CfnOutput(this, "DnsSetupInstructions", {
-        value:
-          "1. Deploy stack → 2. Get task IP from ECS console → 3. Update Route 53 A record 'n8n' with task IP → 4. Access n8n via domain",
-        description: "DNS Setup Steps",
       });
     }
 
+    new cdk.CfnOutput(this, "DirectALBAccess", {
+      value: `http://${this.alb.loadBalancerDnsName}`,
+      description: "Direct ALB Access (backup if DNS not working)",
+    });
+
     new cdk.CfnOutput(this, "Instructions", {
       value: props.domain
-        ? `After updating DNS A record: Access n8n at http://n8n.${props.domain}:5678 (user: admin, password: check Secrets Manager)`
-        : "Get task public IP from ECS console, then access n8n at http://TASK_IP:5678 (user: admin, password: check Secrets Manager)",
+        ? `🚀 Automatic DNS! Access n8n at: http://n8n.${props.domain} (user: admin, password: check Secrets Manager)`
+        : `Access n8n at: http://${this.alb.loadBalancerDnsName} (user: admin, password: check Secrets Manager)`,
       description: "Access Instructions",
     });
 
